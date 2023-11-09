@@ -71,23 +71,53 @@ static void CheckUnwind() {
 }
 
 // -------------------------- Globals --------------------- {{{1
+#if SANITIZER_WINDOWS
+atomic_uint8_t asan_inited{0};
+atomic_uint8_t asan_init_is_running{0};
+#else
 int asan_inited = 0;
 int asan_init_is_running = 0;
+#endif
 
 void SetAsanInited(u32 val) {
+#if SANITIZER_WINDOWS
+  atomic_store(&asan_inited, val, memory_order_release);
+#else
   asan_inited = val;
+#endif
 }
 
 void SetAsanInitIsRunning(u32 val) {
+#if SANITIZER_WINDOWS
+  atomic_store(&asan_init_is_running, val, memory_order_release);
+#else
   asan_init_is_running = val;
+#endif
 }
 
 bool AsanInited() {
+#if SANITIZER_WINDOWS
+  return atomic_load(&asan_inited, memory_order_acquire) == 1;
+#else
   return asan_inited == 1;
+#endif
 }
 
 bool AsanInitIsRunning() {
+#if SANITIZER_WINDOWS
+  return atomic_load(&asan_init_is_running, memory_order_acquire) == 1;
+#else
   return asan_init_is_running == 1;
+#endif
+}
+
+void CheckAsanInitRunning() {
+#if SANITIZER_WINDOWS
+  while (AsanInitIsRunning()) {
+    // If ASAN is initializing on another thread, wait for it to finish.
+  }
+#endif
+  return;
 }
 
 bool replace_intrin_cached;
@@ -399,6 +429,7 @@ void PrintAddressSpaceLayout() {
 }
 
 static void AsanInitInternal() {
+  CheckAsanInitRunning();
   if (LIKELY(AsanInited()))
     return;
   SanitizerToolName = "AddressSanitizer";
