@@ -71,8 +71,55 @@ static void CheckUnwind() {
 }
 
 // -------------------------- Globals --------------------- {{{1
-int asan_inited;
-bool asan_init_is_running;
+#if SANITIZER_WINDOWS
+atomic_uint8_t asan_inited{0};
+atomic_uint8_t asan_init_is_running{0};
+#else
+int asan_inited = 0;
+int asan_init_is_running = 0;
+#endif
+
+void SetAsanInited(u32 val) {
+#if SANITIZER_WINDOWS
+  atomic_store(&asan_inited, val, memory_order_release);
+#else
+  asan_inited = val;
+#endif
+}
+
+void SetAsanInitIsRunning(u32 val) {
+#if SANITIZER_WINDOWS
+  atomic_store(&asan_init_is_running, val, memory_order_release);
+#else
+  asan_init_is_running = val;
+#endif
+}
+
+bool AsanInited() {
+#if SANITIZER_WINDOWS
+  return atomic_load(&asan_inited, memory_order_acquire) == 1;
+#else
+  return asan_inited == 1;
+#endif
+}
+
+bool AsanInitIsRunning() {
+#if SANITIZER_WINDOWS
+  return atomic_load(&asan_init_is_running, memory_order_acquire) == 1;
+#else
+  return asan_init_is_running == 1;
+#endif
+}
+
+void CheckAsanInitRunning() {
+#if SANITIZER_WINDOWS
+  while (AsanInitIsRunning()) {
+    // If ASAN is initializing on another thread, wait for it to finish.
+    internal_sched_yield();
+  }
+#endif
+}
+
 bool replace_intrin_cached;
 
 #if !ASAN_FIXED_MAPPING
@@ -382,10 +429,12 @@ void PrintAddressSpaceLayout() {
 }
 
 static void AsanInitInternal() {
-  if (LIKELY(asan_inited)) return;
+  CheckAsanInitRunning();
+  if (LIKELY(AsanInited()))
+    return;
   SanitizerToolName = "AddressSanitizer";
-  CHECK(!asan_init_is_running && "ASan init calls itself!");
-  asan_init_is_running = true;
+  CHECK(!AsanInitIsRunning() && "ASan init calls itself!");
+  SetAsanInitIsRunning(1);
 
   CacheBinaryName();
 
@@ -398,7 +447,7 @@ static void AsanInitInternal() {
   // Stop performing init at this point if we are being loaded via
   // dlopen() and the platform supports it.
   if (SANITIZER_SUPPORTS_INIT_FOR_DLOPEN && UNLIKELY(HandleDlopenInit())) {
-    asan_init_is_running = false;
+    SetAsanInitIsRunning(0);
     VReport(1, "AddressSanitizer init is being performed for dlopen().\n");
     return;
   }
@@ -460,8 +509,8 @@ static void AsanInitInternal() {
   // On Linux AsanThread::ThreadStart() calls malloc() that's why asan_inited
   // should be set to 1 prior to initializing the threads.
   replace_intrin_cached = flags()->replace_intrin;
-  asan_inited = 1;
-  asan_init_is_running = false;
+  SetAsanInited(1);
+  SetAsanInitIsRunning(0);
 
   if (flags()->atexit)
     Atexit(asan_atexit);
@@ -583,7 +632,7 @@ static void UnpoisonFakeStack() {
 using namespace __asan;
 
 void NOINLINE __asan_handle_no_return() {
-  if (asan_init_is_running)
+  if (AsanInitIsRunning())
     return;
 
   if (!PlatformUnpoisonStacks())
